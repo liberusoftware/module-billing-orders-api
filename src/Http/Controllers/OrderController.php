@@ -10,13 +10,13 @@ use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Gate;
 use Liberu\Billing\Orders\Actions\AddChangeOrder;
 use Liberu\Billing\Orders\Actions\CheckoutCart;
+use Liberu\Billing\Orders\Actions\ConvertQuoteToOrder;
 use Liberu\Billing\Orders\Actions\CreateCart;
 use Liberu\Billing\Orders\Actions\CreateOrder;
 use Liberu\Billing\Orders\Actions\CreateQuote;
-use Liberu\Billing\Orders\Actions\ConvertQuoteToOrder;
 use Liberu\Billing\Orders\Actions\ExpireQuotes;
-use Liberu\Billing\Orders\Actions\TransitionQuote;
 use Liberu\Billing\Orders\Actions\ReviewFraud;
+use Liberu\Billing\Orders\Actions\TransitionQuote;
 use Liberu\Billing\Orders\Enums\FraudReviewStatus;
 use Liberu\Billing\Orders\Models\Cart;
 use Liberu\Billing\Orders\Models\Order;
@@ -29,9 +29,14 @@ final class OrderController extends Controller
     {
         Gate::authorize('viewAny', Order::class);
         $teamId = data_get($request->user(), 'current_team_id') ?? data_get($request->user(), 'currentTeam.id');
-        $orders = $query->execute($teamId === null ? null : (int) $teamId, $request->integer('per_page', 25));
+        $orders = $query->execute($teamId === null ? null : (int) $teamId, $this->pageSize($request));
 
         return response()->json(['data' => $orders->getCollection()->map(fn (Order $o): array => $this->resource($o))->values(), 'meta' => ['current_page' => $orders->currentPage(), 'last_page' => $orders->lastPage()]]);
+    }
+
+    private function pageSize(Request $request): int
+    {
+        return min(max((int) $request->input('page.size', $request->integer('per_page', 25)), 1), 100);
     }
 
     public function store(Request $request, CreateOrder $create): JsonResponse
@@ -50,7 +55,7 @@ final class OrderController extends Controller
         $data = $request->validate(['currency' => ['required', 'string', 'size:3', 'alpha'], 'total_minor' => ['required', 'integer', 'min:0'], 'items' => ['required', 'array'], 'customer_id' => ['nullable', 'integer'], 'valid_until' => ['nullable', 'date']]);
         $data['team_id'] = $this->team($request);
 
-        return response()->json(['data' => $create->execute($data)], 201);
+        return response()->json(['data' => $this->quoteResource($create->execute($data))], 201);
     }
 
     public function cart(Request $request, CreateCart $create): JsonResponse
@@ -59,7 +64,7 @@ final class OrderController extends Controller
         $data = $request->validate(['currency' => ['required', 'string', 'size:3', 'alpha'], 'items' => ['required', 'array'], 'customer_id' => ['nullable', 'integer'], 'expires_at' => ['nullable', 'date']]);
         $data['team_id'] = $this->team($request);
 
-        return response()->json(['data' => $create->execute($data)], 201);
+        return response()->json(['data' => $this->cartResource($create->execute($data))], 201);
     }
 
     public function quoteTransition(Request $request, int $quote, TransitionQuote $transition): JsonResponse
@@ -68,7 +73,7 @@ final class OrderController extends Controller
         Gate::authorize('update', $instance);
         $data = $request->validate(['status' => ['required', 'in:draft,sent,viewed,accepted,declined,expired']]);
 
-        return response()->json(['data' => $transition->execute($instance, $data['status'])]);
+        return response()->json(['data' => $this->quoteResource($transition->execute($instance, $data['status']))]);
     }
 
     public function convertQuote(Request $request, int $quote, ConvertQuoteToOrder $convert): JsonResponse
@@ -119,6 +124,38 @@ final class OrderController extends Controller
     private function resource(Order $o): array
     {
         return ['id' => (string) $o->getKey(), 'type' => 'billing-orders', 'attributes' => ['order_number' => $o->order_number, 'currency' => $o->currency, 'subtotal_minor' => $o->subtotal_minor, 'discount_minor' => $o->discount_minor, 'tax_minor' => $o->tax_minor, 'total_minor' => $o->total_minor, 'status' => $o->status->value, 'fraud_status' => $o->fraud_status->value, 'agreement' => $o->agreement, 'change_orders' => $o->change_orders ?? []]];
+    }
+
+    private function quoteResource(Quote $quote): array
+    {
+        return [
+            'id' => (string) $quote->getKey(),
+            'type' => 'billing-order-quotes',
+            'attributes' => [
+                'quote_number' => $quote->quote_number,
+                'customer_id' => $quote->customer_id,
+                'currency' => $quote->currency,
+                'total_minor' => $quote->total_minor,
+                'items' => $quote->items ?? [],
+                'status' => $quote->status,
+                'valid_until' => $quote->valid_until?->toIso8601String(),
+            ],
+        ];
+    }
+
+    private function cartResource(Cart $cart): array
+    {
+        return [
+            'id' => (string) $cart->getKey(),
+            'type' => 'billing-order-carts',
+            'attributes' => [
+                'customer_id' => $cart->customer_id,
+                'currency' => $cart->currency,
+                'items' => $cart->items ?? [],
+                'status' => $cart->status,
+                'expires_at' => $cart->expires_at?->toIso8601String(),
+            ],
+        ];
     }
 
     private function team(Request $request): ?int
