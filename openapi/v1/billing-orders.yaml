@@ -100,7 +100,7 @@ paths:
 components:
   parameters:
     PageSize:
-      name: per_page
+      name: page[size]
       in: query
       schema: {type: integer, minimum: 1, maximum: 100, default: 25}
     PageNumber:
